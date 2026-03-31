@@ -7,6 +7,9 @@ import json
 import argparse
 from firecrawl import FirecrawlApp
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # ── Config ────────────────────────────────────────────────────────────────────
 OUTPUT_DIR = "data"
 DEFAULT_LIMIT = 500

@@ -5,6 +5,9 @@ import os
 import re
 import json
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # ── Config ────────────────────────────────────────────────────────────────────
 INPUT_DIR  = "data"
 OUTPUT_DIR = "chunks"

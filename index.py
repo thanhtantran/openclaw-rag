@@ -1,167 +1,144 @@
 # index.py
-# Read chunks.json → Create embeddings via OpenAI → Store in ChromaDB
+# Load chunks.json → Embed → Upsert vào ChromaDB
 
 import os
 import json
 import time
 import argparse
 import chromadb
-from openai import OpenAI
+
+from dotenv import load_dotenv
+load_dotenv()
+
+import config
+config.validate()
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CHUNKS_FILE      = "chunks/chunks.json"
-CHROMA_DIR       = "chroma_db"
-COLLECTION_NAME  = "website_knowledge"
-EMBED_MODEL      = "text-embedding-3-small"
-BATCH_SIZE       = 100   # số chunks gửi OpenAI mỗi lần (max 2048)
-SLEEP_BETWEEN    = 0.5   # giây, tránh rate limit
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def load_chunks(filepath: str) -> list[dict]:
-    with open(filepath, "r", encoding="utf-8") as f:
-        chunks = json.load(f)
-    print(f"[index] Loaded {len(chunks)} chunks from {filepath}")
-    return chunks
-
-
-def get_existing_ids(collection) -> set[str]:
-    """Lấy tất cả chunk_id đã có trong ChromaDB để skip khi re-index."""
-    result = collection.get(include=[])
-    return set(result["ids"])
-
-
-def batch(lst: list, size: int):
-    """Yield successive batches from list."""
-    for i in range(0, len(lst), size):
-        yield lst[i : i + size]
-
+CHUNKS_FILE     = "chunks/chunks.json"
+BATCH_SIZE      = 100    # số chunks gửi mỗi batch
+SLEEP_BETWEEN   = 0.5    # giây chờ giữa các batch (tránh rate limit)
 
 # ── Embedding ─────────────────────────────────────────────────────────────────
 
-def embed_texts(client: OpenAI, texts: list[str]) -> list[list[float]]:
-    """Call OpenAI embedding API for a batch of texts."""
-    response = client.embeddings.create(
-        model=EMBED_MODEL,
-        input=texts,
-    )
-    # Sort by index to ensure order
-    vectors = sorted(response.data, key=lambda x: x.index)
-    return [v.embedding for v in vectors]
+def load_embed_model():
+    """Load local sentence-transformers model (chỉ gọi 1 lần)."""
+    from sentence_transformers import SentenceTransformer
+    print(f"[index] Loading local model: {config.EMBED_MODEL_LOCAL} ...")
+    model = SentenceTransformer(config.EMBED_MODEL_LOCAL)
+    print(f"[index] Local model loaded.")
+    return model
+
+
+def embed_texts(texts: list[str], api_key: str = "", local_model=None) -> list[list[float]]:
+    """Embed danh sách texts theo provider đã chọn trong config."""
+
+    if config.EMBED_PROVIDER == "openai":
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        response = client.embeddings.create(
+            model=config.EMBED_MODEL_OPENAI,
+            input=texts,
+        )
+        vectors = sorted(response.data, key=lambda x: x.index)
+        return [v.embedding for v in vectors]
+
+    elif config.EMBED_PROVIDER == "local":
+        vectors = local_model.encode(texts, show_progress_bar=False)
+        return vectors.tolist()
 
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 
-def index_chunks(api_key: str, force: bool = False):
+def index(api_key: str = "", force: bool = False):
+
     # ── Load chunks ──
     if not os.path.exists(CHUNKS_FILE):
         print(f"[error] File not found: {CHUNKS_FILE}")
         print("        Run chunk.py first.")
         exit(1)
 
-    all_chunks = load_chunks(CHUNKS_FILE)
+    with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
+        chunks = json.load(f)
+
+    print(f"[index] Loaded {len(chunks)} chunks from {CHUNKS_FILE}")
 
     # ── Init ChromaDB ──
-    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
-    collection = chroma_client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},  # cosine similarity
+    chroma_client = chromadb.PersistentClient(path=config.CHROMA_DIR)
+    collection    = chroma_client.get_or_create_collection(
+        name=config.COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
     )
-    print(f"[index] ChromaDB collection: '{COLLECTION_NAME}' at ./{CHROMA_DIR}/")
 
-    # ── Skip already indexed chunks ──
-    if force:
-        existing_ids = set()
-        print("[index] Force mode: re-indexing all chunks")
+    # ── Filter chunks chưa index (nếu không force) ──
+    if not force:
+        existing_ids = set(collection.get(include=[])["ids"])
+        chunks = [c for c in chunks if c["id"] not in existing_ids]
+        print(f"[index] {len(chunks)} new chunks to index (skipping existing)")
     else:
-        existing_ids = get_existing_ids(collection)
-        print(f"[index] Already indexed: {len(existing_ids)} chunks")
+        print(f"[index] Force mode: re-indexing all {len(chunks)} chunks")
 
-    new_chunks = [c for c in all_chunks if c["chunk_id"] not in existing_ids]
-
-    if not new_chunks:
-        print("[index] Nothing new to index. All chunks already exist.")
-        print("[index] Use --force to re-index everything.")
+    if not chunks:
+        print("[index] Nothing to index. Done.")
         return
 
-    print(f"[index] New chunks to index: {len(new_chunks)}\n")
+    # ── Load local model 1 lần nếu dùng local ──
+    local_model = None
+    if config.EMBED_PROVIDER == "local":
+        local_model = load_embed_model()
 
-    # ── Init OpenAI ──
-    openai_client = OpenAI(api_key=api_key)
+    # ── Batch embed & upsert ──
+    total   = len(chunks)
+    indexed = 0
 
-    # ── Process in batches ──
-    total_indexed = 0
+    for i in range(0, total, BATCH_SIZE):
+        batch  = chunks[i : i + BATCH_SIZE]
+        texts  = [c["text"] for c in batch]
+        ids    = [c["id"]   for c in batch]
+        metas  = [c["metadata"] for c in batch]
 
-    for i, chunk_batch in enumerate(batch(new_chunks, BATCH_SIZE)):
-        batch_num = i + 1
-        total_batches = (len(new_chunks) + BATCH_SIZE - 1) // BATCH_SIZE
-        print(f"  [batch {batch_num}/{total_batches}] Embedding {len(chunk_batch)} chunks...", end=" ")
+        # Embed
+        vectors = embed_texts(texts, api_key=api_key, local_model=local_model)
 
-        texts = [c["text"] for c in chunk_batch]
-
-        try:
-            vectors = embed_texts(openai_client, texts)
-        except Exception as e:
-            print(f"\n  [error] Embedding failed: {e}")
-            print("  Retrying after 5s...")
-            time.sleep(5)
-            vectors = embed_texts(openai_client, texts)
-
-        # ── Prepare data for ChromaDB ──
-        ids        = [c["chunk_id"]   for c in chunk_batch]
-        documents  = [c["text"]       for c in chunk_batch]
-        metadatas  = [
-            {
-                "source"      : c["source"],
-                "url"         : c["url"],
-                "title"       : c["title"],
-                "chunk_index" : c["chunk_index"],
-                "total_chunks": c["total_chunks"],
-                "char_count"  : c["char_count"],
-            }
-            for c in chunk_batch
-        ]
-
-        # ── Upsert vào ChromaDB ──
+        # Upsert vào ChromaDB
         collection.upsert(
-            ids        = ids,
-            embeddings = vectors,
-            documents  = documents,
-            metadatas  = metadatas,
+            ids=ids,
+            embeddings=vectors,
+            documents=texts,
+            metadatas=metas,
         )
 
-        total_indexed += len(chunk_batch)
-        print(f"done ✓  (total: {total_indexed}/{len(new_chunks)})")
+        indexed += len(batch)
+        print(f"[index] {indexed}/{total} chunks indexed...")
 
-        if i < total_batches - 1:
+        # Tránh rate limit khi dùng OpenAI
+        if config.EMBED_PROVIDER == "openai" and i + BATCH_SIZE < total:
             time.sleep(SLEEP_BETWEEN)
 
-    print(f"\n[index] Indexing complete!")
-    print(f"[index] Total indexed this run : {total_indexed}")
-    print(f"[index] Total in collection    : {collection.count()}")
-    print(f"[index] ChromaDB saved at      : ./{CHROMA_DIR}/")
+    print(f"\n[index] ✓ Done! {indexed} chunks indexed into '{config.COLLECTION_NAME}'")
+    print(f"[index] ✓ ChromaDB saved at: ./{config.CHROMA_DIR}/")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Embed chunks and store in ChromaDB")
+    parser = argparse.ArgumentParser(description="Index chunks into ChromaDB")
     parser.add_argument(
-        "--api-key",
+        "--openai-key",
         default=os.getenv("OPENAI_API_KEY", ""),
-        help="OpenAI API key (or set OPENAI_API_KEY env var)",
+        help="OpenAI API key (required if EMBED_PROVIDER=openai)",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-index all chunks even if already exist",
+        help="Re-index all chunks, including already indexed ones",
     )
     args = parser.parse_args()
 
-    if not args.api_key:
-        print("[error] OpenAI API key is required.")
+    # Validate API key nếu dùng OpenAI embedding
+    if config.EMBED_PROVIDER == "openai" and not args.openai_key:
+        print("[error] OpenAI API key is required when EMBED_PROVIDER=openai")
         print("        Set env: export OPENAI_API_KEY=your_key")
-        print("        Or pass:  --api-key your_key")
+        print("        Or pass:  --openai-key your_key")
         exit(1)
 
-    index_chunks(args.api_key, args.force)
+    index(api_key=args.openai_key, force=args.force)
