@@ -52,16 +52,16 @@ COLLECTION_NAME = "website_knowledge"
 #  CHUNK CONFIG
 # ══════════════════════════════════════════════════════════════════
 
-CHUNK_SIZE = 1000   # Số ký tự mỗi chunk
-OVERLAP    = 150    # Số ký tự overlap giữa các chunk
+CHUNK_SIZE = 1000
+OVERLAP    = 150
 
 
 # ══════════════════════════════════════════════════════════════════
 #  QUERY CONFIG
 # ══════════════════════════════════════════════════════════════════
 
-TOP_K      = 5      # Số chunks retrieve từ vector search
-MAX_TOKENS = 1024   # Max tokens cho LLM response
+TOP_K      = 5
+MAX_TOKENS = 1024
 
 
 # ══════════════════════════════════════════════════════════════════
