@@ -46,22 +46,31 @@ LLM_MODEL = LLM_MODELS[LLM_PROVIDER]
 
 CHROMA_DIR      = "chroma_db"
 COLLECTION_NAME = "website_knowledge"
+CHUNKS_FILE = "chunks/chunks.json"
+INDEX_FILE = "index/index.json"
 
 
 # ══════════════════════════════════════════════════════════════════
 #  CHUNK CONFIG
 # ══════════════════════════════════════════════════════════════════
 
-CHUNK_SIZE = 1000
-OVERLAP    = 150
+CHUNK_SIZE = 1000   # Số ký tự mỗi chunk
+OVERLAP    = 150    # Số ký tự overlap giữa các chunk
+
+# ══════════════════════════════════════════════════════════════════
+#  EMBEDED CONFIG
+# ══════════════════════════════════════════════════════════════════
+EMBED_TYPE = "local"  # "local" or "openai"
+EMBED_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"  # SentenceTransformers model
+EMBED_BATCH_SIZE = 32
 
 
 # ══════════════════════════════════════════════════════════════════
 #  QUERY CONFIG
 # ══════════════════════════════════════════════════════════════════
 
-TOP_K      = 5
-MAX_TOKENS = 1024
+TOP_K      = 5      # Số chunks retrieve từ vector search
+MAX_TOKENS = 1024   # Max tokens cho LLM response
 
 
 # ══════════════════════════════════════════════════════════════════
